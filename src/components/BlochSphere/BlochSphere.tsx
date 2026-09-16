@@ -5,7 +5,11 @@ import { OrbitControls, useCursor } from '@react-three/drei'
 import * as THREE from 'three'
 import { useQuantumStore } from '../../store/useQuantumStore'
 import { ket, stateVectorKatex } from '../../sim/katexFormat'
-import { minusEnergyEigenstate, plusEnergyEigenstate } from '../../sim/hamiltonian'
+import {
+  blochRate,
+  minusEnergyEigenstate,
+  plusEnergyEigenstate,
+} from '../../sim/hamiltonian'
 import { usePrefersReducedMotion } from '../../hooks/usePrefersReducedMotion'
 import { KatexBlock } from '../Katex'
 import { EnergyEigenvectorHint } from '../SectionHints'
@@ -320,43 +324,76 @@ function createFacingFadeMaterial(options: {
 }
 
 const TRAIL_COLOR = 0xb45309
-const TRAIL_OPACITY_NEAR = 0.9
-const TRAIL_OPACITY_FAR = 0.01
+const TRAIL_OPACITY_NEAR = 0.88
+const TRAIL_OPACITY_FAR = 0.0
+const AXIS_INK_DURATION = 0.85
+const AXIS_SOLID_DURATION = 0.55
+const ORBIT_SEGMENTS = 96
+const PERIOD_TICK_RADIUS = 0.018
 
 function createTrailMaterial() {
   return new THREE.ShaderMaterial({
     uniforms: {
       uColor: { value: new THREE.Color(TRAIL_COLOR) },
-      uHot: { value: new THREE.Color('#ea580c') },
+      uDust: { value: new THREE.Color('#c4a484') },
       uTime: { value: 0 },
       uPulse: { value: 0 },
     },
     vertexShader: /* glsl */ `
       attribute float aOpacity;
       attribute float aAge;
+      attribute float aSide;
       varying float vOpacity;
       varying float vAge;
+      varying float vSide;
+      varying vec3 vWorldPos;
 
       void main() {
         vOpacity = aOpacity;
         vAge = aAge;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vSide = aSide;
+        vec4 world = modelMatrix * vec4(position, 1.0);
+        vWorldPos = world.xyz;
+        gl_Position = projectionMatrix * viewMatrix * world;
       }
     `,
     fragmentShader: /* glsl */ `
       uniform vec3 uColor;
-      uniform vec3 uHot;
+      uniform vec3 uDust;
       uniform float uTime;
       uniform float uPulse;
 
       varying float vOpacity;
       varying float vAge;
+      varying float vSide;
+      varying vec3 vWorldPos;
+
+      // Cheap value-noise for chalk grain (no texture fetch).
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+      }
+
+      float chalkNoise(vec3 p) {
+        vec2 g = p.xy * 38.0 + p.z * 17.0;
+        float n =
+          hash(floor(g)) * 0.55 +
+          hash(floor(g * 2.1 + 3.7)) * 0.3 +
+          hash(floor(g * 5.3 + 9.1)) * 0.15;
+        return n;
+      }
 
       void main() {
-        float head = smoothstep(0.55, 1.0, vAge);
-        float shimmer = 0.85 + 0.15 * sin(uTime * 8.0 + vAge * 12.0);
-        vec3 color = mix(uColor, uHot, head * (0.55 + uPulse * 0.35));
-        float alpha = vOpacity * shimmer * (0.75 + head * 0.25);
+        float head = smoothstep(0.62, 1.0, vAge);
+        float dustAge = 1.0 - vAge;
+        // Soft ribbon edge + chalk speckles that intensify on older segments.
+        float edge = 1.0 - smoothstep(0.35, 1.0, abs(vSide));
+        float grain = chalkNoise(vWorldPos + vec3(0.0, uTime * 0.02, 0.0));
+        float speck = mix(0.92, 1.08, grain);
+        float dissolve = 1.0 - dustAge * dustAge * (0.55 + 0.45 * grain);
+        vec3 color = mix(uDust, uColor, head * 0.85 + (1.0 - dustAge) * 0.15);
+        float alpha = vOpacity * edge * speck * dissolve * (0.7 + head * 0.3);
+        alpha *= 0.88 + uPulse * 0.12;
+        if (alpha < 0.008) discard;
         gl_FragColor = vec4(color, alpha);
       }
     `,
@@ -365,6 +402,104 @@ function createTrailMaterial() {
     toneMapped: false,
     side: THREE.DoubleSide,
     blending: THREE.NormalBlending,
+  })
+}
+
+function createRotationAxisMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(ROTATION_AXIS_COLOR) },
+      uReveal: { value: 1 },
+      uDash: { value: 0 },
+      uOpacity: { value: 0.72 },
+    },
+    vertexShader: /* glsl */ `
+      varying float vAlong;
+
+      void main() {
+        // Cylinder along Y from -0.5..0.5 before scale; after scale spans ±AXIS_LEN.
+        vAlong = position.y + 0.5;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor;
+      uniform float uReveal;
+      uniform float uDash;
+      uniform float uOpacity;
+
+      varying float vAlong;
+
+      void main() {
+        if (vAlong > uReveal + 1e-4) discard;
+        // Pen-stroke ink: dashed early, solid as ink settles.
+        float dashCell = fract(vAlong * 16.0);
+        float dashMask = step(0.42, dashCell);
+        float ink = mix(1.0, dashMask, clamp(uDash, 0.0, 1.0));
+        if (ink < 0.5) discard;
+        // Soft tip of the still-drawing stroke.
+        float tip = 1.0 - smoothstep(uReveal - 0.06, uReveal, vAlong);
+        float alpha = uOpacity * tip * (0.55 + 0.45 * (1.0 - uDash));
+        gl_FragColor = vec4(uColor, alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    toneMapped: false,
+  })
+}
+
+function createOrbitRingMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(ROTATION_AXIS_COLOR) },
+      uOpacity: { value: 0.22 },
+      uBreath: { value: 0 },
+    },
+    vertexShader: /* glsl */ `
+      void main() {
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      uniform float uBreath;
+
+      void main() {
+        float alpha = uOpacity * (0.65 + 0.35 * uBreath);
+        gl_FragColor = vec4(uColor, alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    toneMapped: false,
+  })
+}
+
+function createPeriodTickMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color('#a33200') },
+      uBreath: { value: 0 },
+    },
+    vertexShader: /* glsl */ `
+      void main() {
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor;
+      uniform float uBreath;
+
+      void main() {
+        float alpha = 0.35 + 0.55 * uBreath;
+        gl_FragColor = vec4(uColor, alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    toneMapped: false,
   })
 }
 
@@ -412,8 +547,9 @@ function createAtmosphereMaterial() {
 }
 
 function trailOpacity(index: number, count: number): number {
-  const age = (count - 1 - index) / TRAIL_LENGTH
-  const fade = Math.pow(1 - Math.min(1, age), 1.55)
+  // Chalk dust: older segments dissolve faster than a linear fade.
+  const age = (count - 1 - index) / Math.max(1, TRAIL_LENGTH - 1)
+  const fade = Math.pow(1 - Math.min(1, age), 2.15)
   return TRAIL_OPACITY_FAR + (TRAIL_OPACITY_NEAR - TRAIL_OPACITY_FAR) * fade
 }
 
@@ -421,6 +557,15 @@ function trailAge(index: number, count: number): number {
   if (count <= 1) return 1
   return index / (count - 1)
 }
+
+const _omegaAxis = new THREE.Vector3()
+const _orbitCenter = new THREE.Vector3()
+const _orbitRadial = new THREE.Vector3()
+const _orbitU = new THREE.Vector3()
+const _orbitV = new THREE.Vector3()
+const _orbitPoint = new THREE.Vector3()
+const _homePoint = new THREE.Vector3()
+const _inkAxis = new THREE.Vector3()
 
 function StateVector({
   hovered,
@@ -709,6 +854,7 @@ function createTrailRibbon() {
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertCount * 3), 3))
   geometry.setAttribute('aOpacity', new THREE.BufferAttribute(new Float32Array(vertCount), 1))
   geometry.setAttribute('aAge', new THREE.BufferAttribute(new Float32Array(vertCount), 1))
+  geometry.setAttribute('aSide', new THREE.BufferAttribute(new Float32Array(vertCount), 1))
 
   const indices = new Uint16Array((TRAIL_LENGTH - 1) * 6)
   for (let i = 0; i < TRAIL_LENGTH - 1; i++) {
@@ -740,7 +886,9 @@ function writeTrailRibbon(mesh: THREE.Mesh, points: THREE.Vector3[], cameraPos: 
   const positions = mesh.geometry.getAttribute('position') as THREE.BufferAttribute
   const opacities = mesh.geometry.getAttribute('aOpacity') as THREE.BufferAttribute
   const ages = mesh.geometry.getAttribute('aAge') as THREE.BufferAttribute
-  const half = TRAIL_WIDTH / 2
+  const sides = mesh.geometry.getAttribute('aSide') as THREE.BufferAttribute
+  // Older chalk is slightly wider and softer.
+  const baseHalf = TRAIL_WIDTH / 2
   const lift = 1.004
 
   for (let i = 0; i < count; i++) {
@@ -756,23 +904,217 @@ function writeTrailRibbon(mesh: THREE.Mesh, points: THREE.Vector3[], cameraPos: 
       _side.crossVectors(_tangent, _upZ)
       if (_side.lengthSq() < 1e-12) _side.set(1, 0, 0)
     }
+    const age = trailAge(i, count)
+    const half = baseHalf * (1.15 - age * 0.35)
     _side.normalize().multiplyScalar(half)
 
     positions.setXYZ(i * 2, p.x * lift + _side.x, p.y * lift + _side.y, p.z * lift + _side.z)
     positions.setXYZ(i * 2 + 1, p.x * lift - _side.x, p.y * lift - _side.y, p.z * lift - _side.z)
 
     const opacity = trailOpacity(i, count)
-    const age = trailAge(i, count)
     opacities.setX(i * 2, opacity)
     opacities.setX(i * 2 + 1, opacity)
     ages.setX(i * 2, age)
     ages.setX(i * 2 + 1, age)
+    sides.setX(i * 2, 1)
+    sides.setX(i * 2 + 1, -1)
   }
 
   positions.needsUpdate = true
   opacities.needsUpdate = true
   ages.needsUpdate = true
+  sides.needsUpdate = true
   mesh.geometry.setDrawRange(0, (count - 1) * 6)
+}
+
+function RotationAxis() {
+  const groupRef = useRef<THREE.Group>(null)
+  const shaftRef = useRef<THREE.Mesh>(null)
+  const material = useMemo(() => createRotationAxisMaterial(), [])
+  const reduceMotion = usePrefersReducedMotion()
+  const lastKey = useRef('')
+  const reveal = useRef(1)
+  const dash = useRef(0)
+  const opacity = useRef(0.72)
+
+  useFrame((_, delta) => {
+    const { hamiltonian, isPlaying } = useQuantumStore.getState()
+    const len = Math.hypot(hamiltonian.OmegaX, hamiltonian.OmegaY, hamiltonian.omega)
+    const visible = len >= 1e-6
+    const group = groupRef.current
+    const shaft = shaftRef.current
+    if (!group || !shaft) return
+
+    group.visible = visible
+    if (!visible) return
+
+    _inkAxis.set(hamiltonian.OmegaX / len, hamiltonian.omega / len, hamiltonian.OmegaY / len)
+    group.quaternion.setFromUnitVectors(_yAxis, _inkAxis)
+
+    const key = `${hamiltonian.omega.toFixed(4)}|${hamiltonian.OmegaX.toFixed(4)}|${hamiltonian.OmegaY.toFixed(4)}`
+    if (key !== lastKey.current) {
+      lastKey.current = key
+      if (reduceMotion) {
+        reveal.current = 1
+        dash.current = 0
+      } else {
+        reveal.current = 0
+        dash.current = 1
+      }
+    }
+
+    if (reduceMotion) {
+      reveal.current = 1
+      dash.current = 0
+    } else {
+      const revealSpeed = 1 / AXIS_INK_DURATION
+      reveal.current = Math.min(1, reveal.current + delta * revealSpeed)
+      if (reveal.current > 0.82) {
+        const solidSpeed = 1 / AXIS_SOLID_DURATION
+        dash.current = Math.max(0, dash.current - delta * solidSpeed)
+      }
+    }
+
+    const softTarget = isPlaying ? 0.32 : 0.72
+    opacity.current += (softTarget - opacity.current) * Math.min(1, delta * 4)
+
+    material.uniforms.uReveal.value = reveal.current
+    material.uniforms.uDash.value = dash.current
+    material.uniforms.uOpacity.value = opacity.current
+  })
+
+  const shaftLen = AXIS_LEN * 2
+
+  return (
+    <group ref={groupRef} renderOrder={1}>
+      <mesh ref={shaftRef} material={material} scale={[1, shaftLen, 1]} renderOrder={1}>
+        <cylinderGeometry args={[AXIS_SHAFT_WIDTH * 1.15, AXIS_SHAFT_WIDTH * 1.15, 1, 10]} />
+      </mesh>
+    </group>
+  )
+}
+
+/** Precession orbit ring + home tick that breathes once per Rabi period T = 2π/ω_R. */
+function PeriodBreath() {
+  const ringRef = useRef<THREE.LineLoop>(null)
+  const tickRef = useRef<THREE.Mesh>(null)
+  const ringMaterial = useMemo(() => createOrbitRingMaterial(), [])
+  const tickMaterial = useMemo(() => createPeriodTickMaterial(), [])
+  const reduceMotion = usePrefersReducedMotion()
+  const homeAzimuth = useRef<number | null>(null)
+  const lastPlaying = useRef(false)
+  const lastHKey = useRef('')
+  const lastInitial = useRef(useQuantumStore.getState().initialStateId)
+
+  const ringPositions = useMemo(() => {
+    const arr = new Float32Array((ORBIT_SEGMENTS + 1) * 3)
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(arr, 3))
+    return { geometry, arr }
+  }, [])
+
+  useFrame(() => {
+    const { bloch, hamiltonian, isPlaying, initialStateId } = useQuantumStore.getState()
+    const ring = ringRef.current
+    const tick = tickRef.current
+    if (!ring || !tick) return
+
+    const rate = blochRate(hamiltonian)
+    blochTarget(bloch, _target)
+    const hKey = `${hamiltonian.omega}|${hamiltonian.OmegaX}|${hamiltonian.OmegaY}`
+
+    if (hKey !== lastHKey.current || initialStateId !== lastInitial.current) {
+      lastHKey.current = hKey
+      lastInitial.current = initialStateId
+      homeAzimuth.current = null
+    }
+    if (isPlaying && !lastPlaying.current) {
+      homeAzimuth.current = null
+    }
+    lastPlaying.current = isPlaying
+
+    if (rate < 1e-6 || _target.lengthSq() < 1e-8) {
+      ring.visible = false
+      tick.visible = false
+      return
+    }
+
+    _omegaAxis.set(hamiltonian.OmegaX / rate, hamiltonian.omega / rate, hamiltonian.OmegaY / rate)
+    const parallel = _target.dot(_omegaAxis)
+    _orbitCenter.copy(_omegaAxis).multiplyScalar(parallel)
+    _orbitRadial.subVectors(_target, _orbitCenter)
+    const radius = _orbitRadial.length()
+    if (radius < 0.04) {
+      ring.visible = false
+      tick.visible = false
+      return
+    }
+
+    _orbitRadial.multiplyScalar(1 / radius)
+    // Orthonormal frame in the precession plane.
+    _orbitU.copy(_orbitRadial)
+    _orbitV.crossVectors(_omegaAxis, _orbitU)
+    if (_orbitV.lengthSq() < 1e-12) {
+      _orbitV.set(0, 1, 0).cross(_omegaAxis)
+    }
+    _orbitV.normalize()
+
+    const azimuth = Math.atan2(_target.dot(_orbitV), _target.dot(_orbitU))
+    if (homeAzimuth.current === null) {
+      homeAzimuth.current = azimuth
+    }
+
+    const lift = 1.003
+    const positions = ringPositions.arr
+    for (let i = 0; i <= ORBIT_SEGMENTS; i++) {
+      const theta = (i / ORBIT_SEGMENTS) * Math.PI * 2
+      _orbitPoint
+        .copy(_orbitCenter)
+        .addScaledVector(_orbitU, Math.cos(theta) * radius)
+        .addScaledVector(_orbitV, Math.sin(theta) * radius)
+        .multiplyScalar(lift)
+      positions[i * 3] = _orbitPoint.x
+      positions[i * 3 + 1] = _orbitPoint.y
+      positions[i * 3 + 2] = _orbitPoint.z
+    }
+    ringPositions.geometry.attributes.position.needsUpdate = true
+    ring.visible = true
+
+    // Home tick sits at the period-return azimuth on the orbit.
+    const home = homeAzimuth.current
+    _homePoint
+      .copy(_orbitCenter)
+      .addScaledVector(_orbitU, Math.cos(home) * radius)
+      .addScaledVector(_orbitV, Math.sin(home) * radius)
+      .multiplyScalar(lift)
+    tick.position.copy(_homePoint)
+    tick.visible = true
+
+    // Breath peaks each time the state returns to the home azimuth (once per T).
+    let breath = 0
+    if (!reduceMotion) {
+      let dAz = azimuth - home
+      while (dAz > Math.PI) dAz -= Math.PI * 2
+      while (dAz < -Math.PI) dAz += Math.PI * 2
+      const wrap = Math.abs(dAz)
+      breath = isPlaying ? Math.exp(-4.2 * wrap) : 0.12
+    }
+
+    ringMaterial.uniforms.uOpacity.value = 0.14 + breath * 0.2
+    ringMaterial.uniforms.uBreath.value = breath
+    tickMaterial.uniforms.uBreath.value = breath
+    const tickScale = 1 + breath * 0.65
+    tick.scale.setScalar(tickScale)
+  })
+
+  return (
+    <>
+      <lineLoop ref={ringRef} geometry={ringPositions.geometry} material={ringMaterial} renderOrder={1} />
+      <mesh ref={tickRef} material={tickMaterial} renderOrder={2}>
+        <sphereGeometry args={[PERIOD_TICK_RADIUS, 12, 12]} />
+      </mesh>
+    </>
+  )
 }
 
 function BlochScene({
@@ -902,6 +1244,8 @@ function BlochScene({
       <MathLabel position={[0, 0, -1.14]} math={ket('{-i}')} distanceFactor={10} />
 
       <CoordinateAxes />
+      <RotationAxis />
+      <PeriodBreath />
       <primitive object={trailMesh} />
       <StateVector
         hovered={hoveredMarker === 'state'}
