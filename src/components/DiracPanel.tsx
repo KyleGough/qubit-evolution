@@ -21,6 +21,7 @@ import {
   InitialStateHint,
   ProbabilitiesHint,
 } from './SectionHints'
+import { morphDigits } from './digitMorph'
 
 /** KaTeX renders TeX `-` as U+2212. Signs in live slots must match. */
 const KATEX_MINUS = '\u2212'
@@ -131,9 +132,9 @@ function queryAmplitudeRows(host: HTMLElement): AmplitudeSlots[] | null {
 
 function writeAmplitude(slots: AmplitudeSlots, c: Complex) {
   setText(slots.reSign, katexSign(c.re))
-  setText(slots.re, Math.abs(c.re).toFixed(2))
+  morphDigits(slots.re, Math.abs(c.re).toFixed(2))
   setText(slots.imSign, katexSign(c.im))
-  setText(slots.im, `${Math.abs(c.im).toFixed(2)}i`)
+  morphDigits(slots.im, `${Math.abs(c.im).toFixed(2)}i`)
 }
 
 type BlochSlots = { sign: Element; mag: Element }[]

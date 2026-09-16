@@ -714,6 +714,10 @@ input[type='range']:active::-moz-range-thumb {
   .prob-fill {
     transition: width 0.08s linear;
   }
+
+  .digit-roll-track {
+    transition: none !important;
+  }
 }
 
 .dirac-section {
@@ -749,6 +753,36 @@ input[type='range']:active::-moz-range-thumb {
 .math-katex-block .katex-display {
   margin: 0.25rem 0 !important;
   text-align: left;
+}
+
+/* Mechanical digit morph for live |ψ⟩ coefficients */
+.digit-roll {
+  display: inline-block;
+  height: 1em;
+  overflow: hidden;
+  vertical-align: -0.12em;
+  line-height: 1;
+}
+
+.digit-roll-track {
+  display: flex;
+  flex-direction: column;
+  will-change: transform;
+}
+
+.digit-roll-face {
+  display: block;
+  height: 1em;
+  line-height: 1;
+}
+
+.digit-roll-static {
+  display: inline-block;
+  line-height: 1;
+}
+
+.mord.mathtt[data-digit-morph] {
+  white-space: nowrap;
 }
 
 .hamiltonian-formula {
