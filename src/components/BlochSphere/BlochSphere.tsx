@@ -329,7 +329,7 @@ const TRAIL_OPACITY_FAR = 0.0
 const AXIS_INK_DURATION = 0.85
 const AXIS_SOLID_DURATION = 0.55
 const ORBIT_SEGMENTS = 96
-const PERIOD_TICK_RADIUS = 0.018
+const PERIOD_TICK_RADIUS = 0.026
 
 function createTrailMaterial() {
   return new THREE.ShaderMaterial({
@@ -493,8 +493,9 @@ function createPeriodTickMaterial() {
       uniform float uBreath;
 
       void main() {
-        float alpha = 0.35 + 0.55 * uBreath;
-        gl_FragColor = vec4(uColor, alpha);
+        float alpha = 0.4 + 0.6 * uBreath;
+        vec3 color = mix(uColor, vec3(1.0, 0.72, 0.45), uBreath * 0.55);
+        gl_FragColor = vec4(color, alpha);
       }
     `,
     transparent: true,
@@ -1100,10 +1101,10 @@ function PeriodBreath() {
       breath = isPlaying ? Math.exp(-4.2 * wrap) : 0.12
     }
 
-    ringMaterial.uniforms.uOpacity.value = 0.14 + breath * 0.2
+    ringMaterial.uniforms.uOpacity.value = 0.18 + breath * 0.35
     ringMaterial.uniforms.uBreath.value = breath
     tickMaterial.uniforms.uBreath.value = breath
-    const tickScale = 1 + breath * 0.65
+    const tickScale = 1 + breath * 1.1
     tick.scale.setScalar(tickScale)
   })
 
